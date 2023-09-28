@@ -59,7 +59,7 @@ func FindAlbum(id string) (*Album, error) {
 var incrementLikesScript = redis.NewScript(1, `
 	local exists = redis.call('EXISTS', 'album:' .. KEYS[1])
 	if exists == 0 then
-		return -1
+		return redis.error_reply('no album found')
 	end
 	
 	redis.call('HINCRBY', 'album:' ..  KEYS[1], 'likes', 1)
@@ -70,11 +70,12 @@ func IncrementLikes(id string) error {
 	conn := pool.Get()
 	defer conn.Close()
 
-	likes, err := redis.Int(incrementLikesScript.Do(conn, id))
+	_, err := redis.Int(incrementLikesScript.Do(conn, id))
 	if err != nil {
+		if ErrNoAlbum.Error() == err.Error() {
+			err = ErrNoAlbum
+		}
 		return err
-	} else if likes < 0 {
-		return ErrNoAlbum
 	}
 	return nil
 }
