@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"log"
 
 	"github.com/gomodule/redigo/redis"
 )
@@ -80,77 +79,32 @@ func IncrementLikes(id string) error {
 	return nil
 }
 
+var findTopThreeScript = redis.NewScript(0, `
+	local ids = redis.call('ZREVRANGE', 'likes', 0, 2)
+	local albums = {}
+	for i = 1, #ids do
+		table.insert(albums, redis.call('HGETALL', 'album:' .. ids[i]))
+	end
+	return albums
+`)
+
 func FindTopThree() ([]*Album, error) {
 	conn := pool.Get()
 	defer conn.Close()
 
-	// Begin an infinite loop. In a real application, you might want to
-	// limit this to a set number of attempts, and return an error if
-	// the transaction doesn't successfully complete within those
-	// attempts.
-	for {
-		// Instruct Redis to watch the likes sorted set for any changes.
-		_, err := conn.Do("WATCH", "likes")
-		if err != nil {
-			return nil, err
-		}
-
-		// Use the ZREVRANGE command to fetch the album ids with the
-		// highest score (i.e. most likes) from our 'likes' sorted set.
-		// The ZREVRANGE start and stop values are zero-based indexes,
-		// so we use 0 and 2 respectively to limit the reply to the top
-		// three. Because ZREVRANGE returns an array response, we use
-		// the Strings() helper function to convert the reply into a
-		// []string.
-		ids, err := redis.Strings(conn.Do("ZREVRANGE", "likes", 0, 2))
-		if err != nil {
-			return nil, err
-		}
-
-		// Use the MULTI command to inform Redis that we are starting
-		// a new transaction.
-		err = conn.Send("MULTI")
-		if err != nil {
-			return nil, err
-		}
-
-		// Loop through the ids returned by ZREVRANGE, queuing HGETALL
-		// commands to fetch the individual album details.
-		for _, id := range ids {
-			err := conn.Send("HGETALL", "album:"+id)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		// Execute the transaction. Importantly, use the redis.ErrNil
-		// type to check whether the reply from EXEC was nil or not. If
-		// it is nil it means that another client changed the WATCHed
-		// likes sorted set, so we use the continue command to re-run
-		// the loop.
-		replies, err := redis.Values(conn.Do("EXEC"))
-		switch err {
-		default:
-			return nil, err
-		case redis.ErrNil:
-			log.Print("trying again")
-			continue
-		case nil:
-		}
-
-		// Create a new slice to store the album details.
-		albums := make([]*Album, len(ids))
-
-		// Iterate through the array of response objects, using the
-		// ScanStruct() function to assign the data to Album structs.
-		for i, reply := range replies {
-			var album Album
-			err = redis.ScanStruct(reply.([]interface{}), &album)
-			if err != nil {
-				return nil, err
-			}
-			albums[i] = &album
-		}
-		return albums, nil
+	replies, err := redis.Values(findTopThreeScript.Do(conn))
+	if err != nil {
+		return nil, err
 	}
+
+	albums := make([]*Album, len(replies))
+	for i, reply := range replies {
+		var album Album
+		err := redis.ScanStruct(reply.([]any), &album)
+		if err != nil {
+			return nil, err
+		}
+		albums[i] = &album
+	}
+	return albums, nil
 }
